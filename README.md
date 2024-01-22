@@ -25,7 +25,7 @@ $ lldb -p 12345
 ```
 
 ```
-(lldb) continue
+(lldb) trace_custom_api
 ```
 
 ```

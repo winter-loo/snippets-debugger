@@ -43,6 +43,7 @@ br_exprs = [
 class BreakpointResolver:
     def __init__(self, bkpt, extra_args, dict):
         self.bkpt = bkpt
+        _configure_breakpoint(bkpt)
 
     def __callback__(self, sym_ctx):
         module = sym_ctx.GetModule()
