@@ -189,7 +189,6 @@ def pgmem(debugger, raw_args, result, internal_dict):
         pgmem_help()
         return
 
-    print(f"dump `{memcxt_var}` @{dump_file}!{dump_mode}")
     if dump_file is not None:
         sys.stdout = open(dump_file, dump_mode)
 
