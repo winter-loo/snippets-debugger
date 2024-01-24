@@ -1,9 +1,12 @@
 import lldb
 import sys
+import argparse
+import shlex
+import os
+import shutil
 
 
 # C macros in PostgreSQL
-ALLOC_CHUNKHDRSZ = 8
 ALLOCSET_NUM_FREELISTS = 11
 ALLOC_MINBITS = 3
 
@@ -90,6 +93,8 @@ class MemoryContext:
         memcxt: lldb.SBValue
         """
         self._c_memcxt = memcxt
+        # memory context type is an C enum name
+        self.cxttyp = memcxt.GetChildMemberWithName("type").GetValue()
         name = memcxt.GetChildMemberWithName("name")
         self.name = read_c_string_from_memory(name.GetValueAsUnsigned())
         ident = memcxt.GetChildMemberWithName("ident")
@@ -154,53 +159,69 @@ class MemoryChunk:
         return AllocFreeListLink(link)
 
 
-def pgmem_help():
-    print("Usage: pgmem [ -N | -o <file> ] <memory context>")
-    print("  -N: overwrite the dump file")
-    print("  -o: dump to the file instead of stdout")
+Args = None
+Newdumpfile = None
+
+
+def _handle_args(raw_args):
+    parser = argparse.ArgumentParser(description='Dump memory context stats')
+
+    parser.add_argument('memory_context_var', metavar='<memory context>',
+                        help='Memory context to be dumped')
+    parser.add_argument('-N', '--overwrite', action='store_true',
+                        help='overwrite the dump file')
+    parser.add_argument('-o', '--output',
+                        help='dump to file instead of stdout')
+    parser.add_argument('-i', '--include', nargs='+',
+                        metavar='memory_context_name',
+                        help='only dump stats for given memory context name')
+    parser.add_argument('-x', '--exclude', nargs='+',
+                        metavar='memory_context_name',
+                        help='exclude memory context stats from dump')
+    parser.add_argument('-d', '--diff', action='store_true',
+                        help='diff the stats with previous dump')
+    parser.add_argument('-m', '--max-children', type=int, default=100,
+                        help='max number of children to dump')
+
+    global Args
+    args_list = shlex.split(raw_args)
+    Args = parser.parse_args(args_list)
 
 
 def pgmem(debugger, raw_args, result, internal_dict):
-    raw_args = raw_args.split()
+    global Args
+    global Newdumpfile
+    Newdumpfile = None
+    _handle_args(raw_args)
 
-    dump_file = None
     dump_mode = 'a'
-    memcxt_var = None
-
-    i = 0
-    while i < len(raw_args):
-        if raw_args[i] == '-N':
-            dump_mode = 'w'
-            i += 1
-        elif raw_args[i] == '-o':
-            if i + 1 >= len(raw_args):
-                pgmem_help()
-                return
-            dump_file = raw_args[i + 1]
-            i += 2
-        elif not raw_args[i].startswith('-'):
-            memcxt_var = raw_args[i]
-            i += 1
+    if Args.overwrite:
+        dump_mode = 'w'
+    if Args.output:
+        sys.stdout = open(Args.output, dump_mode)
+    if Args.diff:
+        # copy new file to old file if it exists
+        if os.path.isfile('_pgmem.dump.new'):
+            shutil.copyfile('_pgmem.dump.new', '_pgmem.dump.old')
         else:
-            pgmem_help()
-            return
-
-    if memcxt_var is None:
-        pgmem_help()
-        return
-
-    if dump_file is not None:
-        sys.stdout = open(dump_file, dump_mode)
+            open('_pgmem.dump.old', 'w').close()
+        Newdumpfile = open('_pgmem.dump.new', 'w')
 
     process = debugger.GetSelectedTarget().GetProcess()
     frame = process.GetSelectedThread().GetSelectedFrame()
-    memcxt = frame.FindVariable(memcxt_var)
+    memcxt = frame.FindVariable(Args.memory_context_var)
     memcxt = MemoryContext(memcxt)
+    assert memcxt.cxttyp == "T_AllocSetContext", \
+        "memory context is not an AllocSetContext"
 
     grand_totals = MemoryContextCounters()
-    max_children = 100
-    MemoryContextStatsInternal(memcxt, 0, max_children, grand_totals)
+    MemoryContextStatsInternal(memcxt, 0, True, Args.max_children, grand_totals)
     print(grand_totals)
+    if Args.diff:
+        Newdumpfile.close()
+        os.system("diff -u _pgmem.dump.old _pgmem.dump.new")
+        # os.remove('_pgmem.dump.old')
+        # os.remove('_pgmem.dump.new')
 
 
 def maxalign(len):
@@ -228,7 +249,7 @@ def AllocSetStats(context, printfunc, passthru, totals):
         while chunk.is_not_null():
             link = chunk.GetFreeListLink()
             freechunks += 1
-            freespace += chksz + ALLOC_CHUNKHDRSZ
+            freespace += chksz + sizeof("MemoryChunk")
             chunk = MemoryChunk(link.next)
 
     if printfunc:
@@ -245,12 +266,12 @@ def AllocSetStats(context, printfunc, passthru, totals):
         totals.freespace += freespace
 
 
-def MemoryContextStatsInternal(memcxt, level, max_children, totals):
+def MemoryContextStatsInternal(memcxt, level, printit, max_children, totals):
     local_totals = MemoryContextCounters()
 
     # Examine the context itself
     AllocSetStats(memcxt,
-                  MemoryContextStatsPrint,
+                  MemoryContextStatsPrint if printit else None,
                   level,
                   totals)
 
@@ -259,25 +280,28 @@ def MemoryContextStatsInternal(memcxt, level, max_children, totals):
     while child.is_not_null():
         if ichild < max_children:
             MemoryContextStatsInternal(
-                child, level + 1, max_children, totals)
+                child, level + 1, printit, max_children, totals)
         else:
             MemoryContextStatsInternal(
-                child, level + 1, max_children, local_totals)
+                child, level + 1, False, max_children, local_totals)
         child = MemoryContext(child.nextchild)
         ichild += 1
 
     if ichild > max_children:
-        for i in range(level):
-            print("  ", end="")
-        print("{} more child contexts containing {} total in {} blocks; \
-            {} free ({} chunks); {} used",
-              ichild - max_children,
-              local_totals.totalspace,
-              local_totals.nblocks,
-              local_totals.freespace,
-              local_totals.freechunks,
-              local_totals.totalspace - local_totals.freespace,
-              )
+        if printit:
+            for i in range(level + 1):
+                print("  ", end="")
+            print("\
+{} more child contexts containing {} total in {} blocks;  \
+{} free ({} chunks); {} used"
+                  .format(
+                      ichild - max_children,
+                      local_totals.totalspace,
+                      local_totals.nblocks,
+                      local_totals.freespace,
+                      local_totals.freechunks,
+                      local_totals.totalspace - local_totals.freespace
+                  ))
 
         if totals:
             totals.nblocks += local_totals.nblocks
@@ -291,6 +315,20 @@ def MemoryContextStatsPrint(context, passthru, stats_string):
     name = context.name
     ident = context.ident
 
+    if Args.include:
+        if name not in Args.include:
+            return
+
+    if Args.exclude:
+        if name in Args.exclude:
+            return
+
+    def dprint(*args, **kwargs):
+        print(*args, **kwargs)
+        if Newdumpfile:
+            Newdumpfile.write(*args)
+            Newdumpfile.write('\n')
+
     #
     # It seems preferable to label dynahash contexts with just the hash table
     # name.  Those are already unique enough, so the "dynahash" part isn't
@@ -301,9 +339,9 @@ def MemoryContextStatsPrint(context, passthru, stats_string):
         ident = ""
 
     for i in range(level):
-        print("  ", end="")
-    ident = f"({ident})" if len(ident) > 0 else ""
-    print(f"{name}{ident}: {stats_string}")
+        dprint("  ", end="")
+    ident = f": {ident}" if len(ident) > 0 else ""
+    dprint(f"{name}: {stats_string}{ident}")
 
 
 def __lldb_init_module(debugger, internal_dict):
