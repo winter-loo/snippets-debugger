@@ -102,9 +102,15 @@ class MemoryContext:
         self.methods = memcxt.GetChildMemberWithName("methods")
         self.firstchild = memcxt.GetChildMemberWithName("firstchild")
         self.nextchild = memcxt.GetChildMemberWithName("nextchild")
+        self._current = lldb_target.FindFirstGlobalVariable("CurrentMemoryContext")
 
     def is_not_null(self):
         return self._c_memcxt.GetValueAsUnsigned() != 0
+
+    def Current(self):
+        name = self._current.GetChildMemberWithName("name")
+        name = read_c_string_from_memory(name.GetValueAsUnsigned())
+        return name
 
 
 class AllocSetContext:
@@ -166,7 +172,9 @@ Newdumpfile = None
 def _handle_args(raw_args):
     parser = argparse.ArgumentParser(description='Dump memory context stats')
 
-    parser.add_argument('memory_context_var', metavar='<memory context>',
+    parser.add_argument('memory_context_var', nargs='?',
+                        default='TopMemoryContext',
+                        metavar='<memory context>',
                         help='Memory context to be dumped')
     parser.add_argument('-N', '--overwrite', action='store_true',
                         help='overwrite the dump file')
@@ -189,6 +197,10 @@ def _handle_args(raw_args):
 
 
 def pgmem(debugger, raw_args, result, internal_dict):
+    if lldb_target.GetProcess().GetState() == lldb.eStateRunning:
+        print("Process is running.  Use 'process interrupt' to pause execution.")
+        return
+
     global Args
     global Newdumpfile
     Newdumpfile = None
@@ -203,13 +215,17 @@ def pgmem(debugger, raw_args, result, internal_dict):
         # copy new file to old file if it exists
         if os.path.isfile('_pgmem.dump.new'):
             shutil.copyfile('_pgmem.dump.new', '_pgmem.dump.old')
-        else:
-            open('_pgmem.dump.old', 'w').close()
         Newdumpfile = open('_pgmem.dump.new', 'w')
 
     process = debugger.GetSelectedTarget().GetProcess()
     frame = process.GetSelectedThread().GetSelectedFrame()
+
     memcxt = frame.FindVariable(Args.memory_context_var)
+    if not memcxt.IsValid():
+        memcxt = lldb_target.FindFirstGlobalVariable(Args.memory_context_var)
+        if not memcxt.IsValid():
+            print(f"variable `{Args.memory_context_var}` not found in current frame")
+            return
     memcxt = MemoryContext(memcxt)
     assert memcxt.cxttyp == "T_AllocSetContext", \
         "memory context is not an AllocSetContext"
@@ -219,7 +235,7 @@ def pgmem(debugger, raw_args, result, internal_dict):
     print(grand_totals)
     if Args.diff:
         Newdumpfile.close()
-        os.system("diff -u _pgmem.dump.old _pgmem.dump.new")
+        os.system("diff -duN --color=always _pgmem.dump.old _pgmem.dump.new")
         # os.remove('_pgmem.dump.old')
         # os.remove('_pgmem.dump.new')
 
@@ -324,10 +340,12 @@ def MemoryContextStatsPrint(context, passthru, stats_string):
             return
 
     def dprint(*args, **kwargs):
-        print(*args, **kwargs)
         if Newdumpfile:
             Newdumpfile.write(*args)
-            Newdumpfile.write('\n')
+            if kwargs.get("end", None) is None:
+                Newdumpfile.write("\n")
+        else:
+            print(*args, **kwargs)
 
     #
     # It seems preferable to label dynahash contexts with just the hash table
@@ -341,6 +359,8 @@ def MemoryContextStatsPrint(context, passthru, stats_string):
     for i in range(level):
         dprint("  ", end="")
     ident = f": {ident}" if len(ident) > 0 else ""
+    if context.Current() == name:
+        name = f"*{name}"
     dprint(f"{name}: {stats_string}{ident}")
 
 
