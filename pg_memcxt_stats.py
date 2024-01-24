@@ -12,6 +12,11 @@ ALLOC_MINBITS = 3
 
 
 lldb_target = lldb.debugger.GetSelectedTarget()
+CONTEXT_KINDS = [
+    "T_AllocSetContext",
+    "T_SlabContext",
+    "T_GenerationContext",
+]
 
 
 class MemoryContextCounters:
@@ -94,7 +99,7 @@ class MemoryContext:
         """
         self._c_memcxt = memcxt
         # memory context type is an C enum name
-        self.cxttyp = memcxt.GetChildMemberWithName("type").GetValue()
+        self.typcxt = memcxt.GetChildMemberWithName("type").GetValue()
         name = memcxt.GetChildMemberWithName("name")
         self.name = read_c_string_from_memory(name.GetValueAsUnsigned())
         ident = memcxt.GetChildMemberWithName("ident")
@@ -102,7 +107,8 @@ class MemoryContext:
         self.methods = memcxt.GetChildMemberWithName("methods")
         self.firstchild = memcxt.GetChildMemberWithName("firstchild")
         self.nextchild = memcxt.GetChildMemberWithName("nextchild")
-        self._current = lldb_target.FindFirstGlobalVariable("CurrentMemoryContext")
+        self._current = lldb_target.FindFirstGlobalVariable(
+            "CurrentMemoryContext")
 
     def is_not_null(self):
         return self._c_memcxt.GetValueAsUnsigned() != 0
@@ -228,14 +234,16 @@ def pgmem(debugger, raw_args, result, internal_dict):
     if not memcxt.IsValid():
         memcxt = lldb_target.FindFirstGlobalVariable(Args.memory_context_var)
         if not memcxt.IsValid():
-            print(f"variable `{Args.memory_context_var}` not found in current frame")
+            print("variable `%s` not found in current frame",
+                  Args.memory_context_var)
             return
     memcxt = MemoryContext(memcxt)
-    assert memcxt.cxttyp == "T_AllocSetContext", \
-        "memory context is not an AllocSetContext"
+    assert memcxt.typcxt in CONTEXT_KINDS, \
+        f"{Args.memory_context_var} is not an MemoryContext"
 
     grand_totals = MemoryContextCounters()
-    MemoryContextStatsInternal(memcxt, 0, True, Args.max_children, grand_totals)
+    MemoryContextStatsInternal(
+        memcxt, 0, True, Args.max_children, grand_totals)
     print(grand_totals)
     if Args.diff:
         Newdumpfile.close()
@@ -286,14 +294,116 @@ def AllocSetStats(context, printfunc, passthru, totals):
         totals.freespace += freespace
 
 
+class dlist_node:
+    def __init__(self, node):
+        self._c_node = node
+        self.next = node.GetChildMemberWithName("next")
+        self.prev = node.GetChildMemberWithName("prev")
+
+
+#
+# GenerationBlock
+#  	GenerationBlock is the unit of memory that is obtained by generation.c
+#  	from malloc().  It contains zero or more MemoryChunks, which are the
+#  	units requested by palloc() and freed by pfree().  MemoryChunks cannot
+#  	be returned to malloc() individually, instead pfree() updates the free
+#  	counter of the block and when all chunks in a block are free the whole
+#  	block can be returned to malloc().
+#
+#  	GenerationBlock is the header data for a block --- the usable space
+#  	within the block begins at the next alignment boundary.
+#
+class GenerationBlock:
+    def __init__(self, blk):
+        self._c_blk = blk
+        self.node = dlist_node(blk.GetChildMemberWithName("node"))
+        self.context = blk.GetChildMemberWithName("context")
+        self.blksize = blk.GetChildMemberWithName("blksize").GetValue()
+        self.nchunks = blk.GetChildMemberWithName("nchunks").GetValue()
+        self.nfree = blk.GetChildMemberWithName("nfree").GetValue()
+        freeptr = blk.GetChildMemberWithName("freeptr")
+        self.freeptr = freeptr.GetValueAsUnsigned()
+        endptr = blk.GetChildMemberWithName("endptr")
+        self.endptr = endptr.GetValueAsUnsigned()
+
+
+class dlist_head:
+    def __init__(self, head):
+        self._c_head = head
+        self.head = dlist_node(head.GetChildMemberWithName("head"))
+
+    # TODO:
+    def __iter__(self):
+        node = self.head
+        while node.is_not_null():
+            yield node
+            node = dlist_node(node.next)
+
+
+class GenerationContext:
+    def __init__(self, gen):
+        self._c_gen = gen
+        # Standard memory-context fields
+        self.header = MemoryContext(gen.GetChildMemberWithName("header"))
+        # current (most recently allocated) block, or
+        # NULL if we've just freed the most recent block
+        self.block = GenerationBlock(gen.GetChildMemberWithName("block"))
+        # pointer to a block that's being recycled,
+        # or NULL if there's no such block.
+        self.freeblock = GenerationBlock(
+            gen.GetChildMemberWithName("freeblock"))
+        # list of blocks
+        self.blocks = dlist_head(gen.GetChildMemberWithName("blocks"))
+
+
+def GenerationStats(context, printfunc, passthru, totals):
+    aset = GenerationContext(cast_memcxt(context, "GenerationContext"))
+
+    totalspace = sizeof("GenerationContext")
+    nblocks = 0
+    nchunks = 0
+    nfreechunks = 0
+    freespace = 0
+
+    for block in aset.blocks:
+        nblocks += 1
+        nchunks += block.nchunks
+        nfreechunks += block.nfree
+        totalspace += block.blksize
+        freespace += block.available()
+
+    if printfunc:
+        stats_string = \
+            "{} total in {} blocks ({} chunks); {} free ({} chunks); {} used" \
+            .format(totalspace, nblocks, nchunks, freespace, nfreechunks,
+                    totalspace - freespace)
+        printfunc(context, passthru, stats_string)
+
+    if totals:
+        totals.nblocks += nblocks
+        totals.freechunks += nfreechunks
+        totals.totalspace += totalspace
+        totals.freespace += freespace
+
+
+def SlabStats(context, printfunc, passthru, totals):
+    pass
+
+
+MEMORY_CONTEXT_STATS_IMPL = {
+    "T_AllocSetContext": AllocSetStats,
+    "T_SlabContext": SlabStats,
+    "T_GenerationContext": GenerationStats,
+}
+
+
 def MemoryContextStatsInternal(memcxt, level, printit, max_children, totals):
     local_totals = MemoryContextCounters()
 
     # Examine the context itself
-    AllocSetStats(memcxt,
-                  MemoryContextStatsPrint if printit else None,
-                  level,
-                  totals)
+    fn_stats = MEMORY_CONTEXT_STATS_IMPL[memcxt.typcxt]
+    fn_print = MemoryContextStatsPrint if printit else None
+    fn_stats(memcxt, fn_print, level, totals)
 
     ichild = 0
     child = MemoryContext(memcxt.firstchild)
