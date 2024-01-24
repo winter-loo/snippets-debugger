@@ -190,6 +190,8 @@ def _handle_args(raw_args):
                         help='diff the stats with previous dump')
     parser.add_argument('-m', '--max-children', type=int, default=100,
                         help='max number of children to dump')
+    parser.add_argument('-c', '--use-cc', action='store_true',
+                        help='use global CurrentMemoryContext')
 
     global Args
     args_list = shlex.split(raw_args)
@@ -220,6 +222,8 @@ def pgmem(debugger, raw_args, result, internal_dict):
     process = debugger.GetSelectedTarget().GetProcess()
     frame = process.GetSelectedThread().GetSelectedFrame()
 
+    if Args.use_cc:
+        Args.memory_context_var = "CurrentMemoryContext"
     memcxt = frame.FindVariable(Args.memory_context_var)
     if not memcxt.IsValid():
         memcxt = lldb_target.FindFirstGlobalVariable(Args.memory_context_var)
