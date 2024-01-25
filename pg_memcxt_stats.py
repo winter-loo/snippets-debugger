@@ -78,7 +78,7 @@ class MemoryContext:
 
 class GlobalMemoryContext:
     current = MemoryContext(
-            lldb_target.FindFirstGlobalVariable("CurrentMemoryContext"))
+        lldb_target.FindFirstGlobalVariable("CurrentMemoryContext"))
 
 
 def cast_memcxt(value: MemoryContext, typname):
@@ -265,7 +265,19 @@ class dlist_node:
         assert not node.GetType().IsPointerType(), "node is a pointer type"
         self._c_node = node
         self.next = node.GetChildMemberWithName("next")
+        assert self.next.GetType().IsPointerType(), "next is not a pointer type"
         self.prev = node.GetChildMemberWithName("prev")
+        assert self.prev.GetType().IsPointerType(), "prev is not a pointer type"
+
+    def Next(self):
+        if self.next.GetValueAsUnsigned() == 0:
+            return None
+        return dlist_node(self.next.Dereference())
+
+    def Prev(self):
+        if self.prev.GetValueAsUnsigned() == 0:
+            return None
+        return dlist_node(self.prev.Dereference())
 
     def _is_empty(self):
         next_ptr = self.next.GetValueAsUnsigned()
@@ -278,14 +290,14 @@ class dlist_node:
         return not self._is_empty()
 
     def CastAs(self, typname):
+        """
+        dlist_node* -> typname*
+        """
         target_typ = lldb_target.FindFirstType(typname)
-        target_ptr = target_typ.GetPointerType()
-        source_typ = self._c_node.GetType()
-        generic_ptr = self._c_node.AddressOf()
-        source_ptr = generic_ptr.Cast(source_typ.GetPointerType())
-        offset = target_typ.GetByteSize() - source_typ.GetByteSize()
-        generic_target_ptr = source_ptr.GetValueAsUnsigned() - offset
-        return lldb.SBAddress(generic_target_ptr, lldb_target).Cast(target_ptr)
+        target_typ_ptr = target_typ.GetPointerType()  # typname*
+        generic_ptr = self._c_node.AddressOf()  # char*
+        target_ptr = generic_ptr.Cast(target_typ_ptr)
+        return target_ptr
 
     def __eq__(self, other):
         return self._c_node.AddressOf().GetValueAsUnsigned() == \
@@ -314,10 +326,10 @@ class dlist_head:
 
     def __iter__(self):
         end = self.head
-        cur = dlist_node(self.head.next.Dereference())
-        while cur.is_valid() and cur != end:
+        cur = self.head.Next()
+        while cur and cur.is_valid() and cur != end:
             yield cur
-            cur = dlist_node(cur.next.Dereference())
+            cur = cur.Next()
 
 
 #
@@ -335,10 +347,10 @@ class dlist_head:
 class GenerationBlock:
     def __init__(self, blk: lldb.SBValue):
         """
-        blk could be a pointer to a GenerationBlock or a GenerationBlock
+        blk is a pointer to a GenerationBlock
         """
         self._c_blk = blk
-        self.node = dlist_node(blk.GetChildMemberWithName("node").AddressOf())
+        self.node = dlist_node(blk.GetChildMemberWithName("node"))
         self.context = blk.GetChildMemberWithName("context")
 
         blksize = blk.GetChildMemberWithName("blksize")
@@ -360,6 +372,7 @@ class GenerationContext:
     def __init__(self, gen: lldb.SBValue):
         self._c_gen = gen
         # list of blocks
+        # same: &gen.blocks, &gen.blocks.head, &gen.blocks.head.prev
         blocks = gen.GetChildMemberWithName("blocks")
         self.blocks = dlist_head(blocks)
 
