@@ -1,4 +1,4 @@
-import lldb
+import lldb  # type ignore
 import sys
 import argparse
 import shlex
@@ -46,77 +46,45 @@ def sizeof(typname):
     return lldb_target.FindFirstType(typname).GetByteSize()
 
 
-def cast_memcxt(value, typname):
-    memcxt = value._c_memcxt
-    assert memcxt.GetType().IsPointerType(), "memcxt is not a pointer type"
-    return memcxt.Cast(lldb_target.FindFirstType(typname).GetPointerType())
-
-
-def read_c_string_from_memory(address):
-    if address == 0:
-        return ""
-
-    process = lldb_target.GetProcess()
-
-    # Read memory in chunks until a null terminator is encountered
-    chunk_size = 64
-    max_length = 4096  # Maximum length to prevent infinite loops
-
-    c_string = b''
-    offset = 0
-
-    while offset < max_length:
-        error = lldb.SBError()
-        memory_data = process.ReadMemory(address + offset, chunk_size, error)
-
-        if error.Fail():
-            print(f"Error reading memory: {error}")
-            return None
-
-        if b'\0' in memory_data:
-            # If null terminator is found, stop reading
-            null_index = memory_data.index(b'\0')
-            c_string += memory_data[:null_index]
-            break
-        else:
-            # Append the entire chunk to the string
-            c_string += memory_data
-
-        offset += chunk_size
-
-    return c_string.decode('utf-8')
-
-
 # Determine the size of the chunk based on the freelist index
 def GetChunkSizeFromFreeListIdx(fidx):
     return 1 << ALLOC_MINBITS << fidx
 
 
 class MemoryContext:
-    def __init__(self, memcxt):
-        """
-        memcxt: lldb.SBValue
-        """
+    def __init__(self, memcxt: lldb.SBValue):
+        assert memcxt.GetType().IsPointerType(), "memcxt is not a pointer type"
         self._c_memcxt = memcxt
         # memory context type is an C enum name
         self.typcxt = memcxt.GetChildMemberWithName("type").GetValue()
-        name = memcxt.GetChildMemberWithName("name")
-        self.name = read_c_string_from_memory(name.GetValueAsUnsigned())
-        ident = memcxt.GetChildMemberWithName("ident")
-        self.ident = read_c_string_from_memory(ident.GetValueAsUnsigned())
+        name = memcxt.GetChildMemberWithName("name").GetSummary()
+        self.name = name.strip("\"") if name else ""
+        ident = memcxt.GetChildMemberWithName("ident").GetSummary()
+        self.ident = ident.strip("\"") if ident else ""
         self.methods = memcxt.GetChildMemberWithName("methods")
         self.firstchild = memcxt.GetChildMemberWithName("firstchild")
         self.nextchild = memcxt.GetChildMemberWithName("nextchild")
-        self._current = lldb_target.FindFirstGlobalVariable(
-            "CurrentMemoryContext")
+
+    def __eq__(self, other):
+        return self._c_memcxt.GetValueAsUnsigned() == \
+            other._c_memcxt.GetValueAsUnsigned()
 
     def is_not_null(self):
         return self._c_memcxt.GetValueAsUnsigned() != 0
 
-    def Current(self):
-        name = self._current.GetChildMemberWithName("name")
-        name = read_c_string_from_memory(name.GetValueAsUnsigned())
-        return name
+    def CastAs(self, typname):
+        return cast_memcxt(self, typname)
+
+
+class GlobalMemoryContext:
+    current = MemoryContext(
+            lldb_target.FindFirstGlobalVariable("CurrentMemoryContext"))
+
+
+def cast_memcxt(value: MemoryContext, typname):
+    memcxt = value._c_memcxt
+    assert memcxt.GetType().IsPointerType(), "memcxt is not a pointer type"
+    return memcxt.Cast(lldb_target.FindFirstType(typname).GetPointerType())
 
 
 class AllocSetContext:
@@ -230,13 +198,11 @@ def pgmem(debugger, raw_args, result, internal_dict):
 
     if Args.all_contexts:
         Args.memory_context_var = "TopMemoryContext"
-    memcxt = frame.FindVariable(Args.memory_context_var)
-    if not memcxt.IsValid():
-        memcxt = lldb_target.FindFirstGlobalVariable(Args.memory_context_var)
-        if not memcxt.IsValid():
-            print("variable `%s` not found in current frame",
-                  Args.memory_context_var)
-            return
+    memcxt = frame.EvaluateExpression(Args.memory_context_var)
+    if not memcxt.GetError().Success():
+        print("expression `{}` is not valid"
+              .format(Args.memory_context_var))
+        return
     memcxt = MemoryContext(memcxt)
     assert memcxt.typcxt in CONTEXT_KINDS, \
         f"{Args.memory_context_var} is not an MemoryContext"
@@ -256,12 +222,12 @@ def maxalign(len):
     return (len + 7) & ~7
 
 
-def AllocSetStats(context, printfunc, passthru, totals):
-    totalspace = sizeof("AllocSetContext")
+def AllocSetStats(context: MemoryContext, printfunc, passthru, totals):
+    totalspace = maxalign(sizeof("AllocSetContext"))
     nblocks = 0
     freespace = 0
     freechunks = 0
-    aset = AllocSetContext(cast_memcxt(context, "AllocSetContext"))
+    aset = AllocSetContext(context.CastAs("AllocSetContext"))
 
     block = AllocBlock(aset.blocks)
     while block:
@@ -295,10 +261,63 @@ def AllocSetStats(context, printfunc, passthru, totals):
 
 
 class dlist_node:
-    def __init__(self, node):
+    def __init__(self, node: lldb.SBValue):
+        assert not node.GetType().IsPointerType(), "node is a pointer type"
         self._c_node = node
         self.next = node.GetChildMemberWithName("next")
         self.prev = node.GetChildMemberWithName("prev")
+
+    def _is_empty(self):
+        next_ptr = self.next.GetValueAsUnsigned()
+        prev_ptr = self.prev.GetValueAsUnsigned()
+        node_ptr = self._c_node.AddressOf().GetValueAsUnsigned()
+        return (next_ptr == 0 and prev_ptr == 0) or \
+            (next_ptr == node_ptr and prev_ptr == node_ptr)
+
+    def is_valid(self):
+        return not self._is_empty()
+
+    def CastAs(self, typname):
+        target_typ = lldb_target.FindFirstType(typname)
+        target_ptr = target_typ.GetPointerType()
+        source_typ = self._c_node.GetType()
+        generic_ptr = self._c_node.AddressOf()
+        source_ptr = generic_ptr.Cast(source_typ.GetPointerType())
+        offset = target_typ.GetByteSize() - source_typ.GetByteSize()
+        generic_target_ptr = source_ptr.GetValueAsUnsigned() - offset
+        return lldb.SBAddress(generic_target_ptr, lldb_target).Cast(target_ptr)
+
+    def __eq__(self, other):
+        return self._c_node.AddressOf().GetValueAsUnsigned() == \
+            other._c_node.AddressOf().GetValueAsUnsigned()
+
+    def __str__(self):
+        return "<dlist_node: {{next: {},, prev: {}}}>".format(
+            self.next.GetValueAsUnsigned(), self.prev.GetValueAsUnsigned())
+
+
+class dlist_head:
+    def __init__(self, blocks: lldb.SBValue):
+        assert not blocks.GetType().IsPointerType(), "blocks is a pointer type"
+        self._c_head = blocks.GetChildMemberWithName("head")
+        #
+        # head.next either points to the first element of the list; to &head if
+        # it's a circular empty list; or to NULL if empty and not circular.
+        #
+        # head.prev either points to the last element of the list; to &head if
+        # it's a circular empty list; or to NULL if empty and not circular.
+        #
+        self.head = dlist_node(self._c_head)
+
+    def is_empty(self):
+        return self.head._is_empty()
+
+    def __iter__(self):
+        end = self.head
+        cur = dlist_node(self.head.next.Dereference())
+        while cur.is_valid() and cur != end:
+            yield cur
+            cur = dlist_node(cur.next.Dereference())
 
 
 #
@@ -314,58 +333,48 @@ class dlist_node:
 #  	within the block begins at the next alignment boundary.
 #
 class GenerationBlock:
-    def __init__(self, blk):
+    def __init__(self, blk: lldb.SBValue):
+        """
+        blk could be a pointer to a GenerationBlock or a GenerationBlock
+        """
         self._c_blk = blk
-        self.node = dlist_node(blk.GetChildMemberWithName("node"))
+        self.node = dlist_node(blk.GetChildMemberWithName("node").AddressOf())
         self.context = blk.GetChildMemberWithName("context")
-        self.blksize = blk.GetChildMemberWithName("blksize").GetValue()
-        self.nchunks = blk.GetChildMemberWithName("nchunks").GetValue()
-        self.nfree = blk.GetChildMemberWithName("nfree").GetValue()
+
+        blksize = blk.GetChildMemberWithName("blksize")
+        self.blksize = blksize.GetValueAsUnsigned()
+        nchunks = blk.GetChildMemberWithName("nchunks")
+        self.nchunks = nchunks.GetValueAsUnsigned()
+        nfree = blk.GetChildMemberWithName("nfree")
+        self.nfree = nfree.GetValueAsUnsigned()
         freeptr = blk.GetChildMemberWithName("freeptr")
         self.freeptr = freeptr.GetValueAsUnsigned()
         endptr = blk.GetChildMemberWithName("endptr")
         self.endptr = endptr.GetValueAsUnsigned()
 
-
-class dlist_head:
-    def __init__(self, head):
-        self._c_head = head
-        self.head = dlist_node(head.GetChildMemberWithName("head"))
-
-    # TODO:
-    def __iter__(self):
-        node = self.head
-        while node.is_not_null():
-            yield node
-            node = dlist_node(node.next)
+    def available(self):
+        return self.endptr - self.freeptr
 
 
 class GenerationContext:
-    def __init__(self, gen):
+    def __init__(self, gen: lldb.SBValue):
         self._c_gen = gen
-        # Standard memory-context fields
-        self.header = MemoryContext(gen.GetChildMemberWithName("header"))
-        # current (most recently allocated) block, or
-        # NULL if we've just freed the most recent block
-        self.block = GenerationBlock(gen.GetChildMemberWithName("block"))
-        # pointer to a block that's being recycled,
-        # or NULL if there's no such block.
-        self.freeblock = GenerationBlock(
-            gen.GetChildMemberWithName("freeblock"))
         # list of blocks
-        self.blocks = dlist_head(gen.GetChildMemberWithName("blocks"))
+        blocks = gen.GetChildMemberWithName("blocks")
+        self.blocks = dlist_head(blocks)
 
 
-def GenerationStats(context, printfunc, passthru, totals):
-    aset = GenerationContext(cast_memcxt(context, "GenerationContext"))
+def GenerationStats(context: MemoryContext, printfunc, passthru, totals):
+    gen = GenerationContext(context.CastAs("GenerationContext"))
 
-    totalspace = sizeof("GenerationContext")
+    totalspace = maxalign(sizeof("GenerationContext"))
     nblocks = 0
     nchunks = 0
     nfreechunks = 0
     freespace = 0
 
-    for block in aset.blocks:
+    for node in gen.blocks:
+        block = GenerationBlock(node.CastAs("GenerationBlock"))
         nblocks += 1
         nchunks += block.nchunks
         nfreechunks += block.nfree
@@ -440,7 +449,7 @@ def MemoryContextStatsInternal(memcxt, level, printit, max_children, totals):
             totals.freespace += local_totals.freespace
 
 
-def MemoryContextStatsPrint(context, passthru, stats_string):
+def MemoryContextStatsPrint(context: MemoryContext, passthru, stats_string):
     level = passthru
     name = context.name
     ident = context.ident
@@ -473,7 +482,7 @@ def MemoryContextStatsPrint(context, passthru, stats_string):
     for i in range(level):
         dprint("  ", end="")
     ident = f": {ident}" if len(ident) > 0 else ""
-    if context.Current() == name:
+    if context == GlobalMemoryContext.current:
         name = f"*{name}"
     dprint(f"{name}: {stats_string}{ident}")
 
