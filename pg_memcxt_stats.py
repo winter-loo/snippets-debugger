@@ -300,12 +300,15 @@ class dlist_node:
         return target_ptr
 
     def __eq__(self, other):
-        return self._c_node.AddressOf().GetValueAsUnsigned() == \
-            other._c_node.AddressOf().GetValueAsUnsigned()
+        next_ptr = self.next.GetValueAsUnsigned()
+        other_next_ptr = other.next.GetValueAsUnsigned()
+        prev_ptr = self.prev.GetValueAsUnsigned()
+        other_prev_ptr = other.prev.GetValueAsUnsigned()
+        return next_ptr == other_next_ptr and prev_ptr == other_prev_ptr
 
     def __str__(self):
-        return "<dlist_node: {{next: {},, prev: {}}}>".format(
-            self.next.GetValueAsUnsigned(), self.prev.GetValueAsUnsigned())
+        return "<dlist_node: {{next: {}, prev: {}}}>".format(
+            self.next.GetValue(), self.prev.GetValue())
 
 
 class dlist_head:
