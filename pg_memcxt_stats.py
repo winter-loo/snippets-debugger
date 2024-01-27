@@ -149,7 +149,7 @@ def _handle_args(raw_args):
 
     parser.add_argument('memory_context_var', nargs='?',
                         default='CurrentMemoryContext',
-                        metavar='<memory context>',
+                        metavar='[memory context]',
                         help='Memory context to be dumped')
     parser.add_argument('-N', '--overwrite', action='store_true',
                         help='overwrite the dump file')
@@ -167,6 +167,8 @@ def _handle_args(raw_args):
                         help='max number of children to dump')
     parser.add_argument('-a', '--all-contexts', action='store_true',
                         help='show all memory contexts')
+    parser.add_argument('-r', '--with-addr', action='store_true',
+                        help='show memory context address')
 
     global Args
     args_list = shlex.split(raw_args)
@@ -214,7 +216,7 @@ def pgmem(debugger, raw_args, result, internal_dict):
     print(grand_totals)
     if Args.diff:
         Newdumpfile.close()
-        os.system("diff -duN --color=always _pgmem.dump.old _pgmem.dump.new")
+        os.system("diff -uN --color=always _pgmem.dump.old _pgmem.dump.new")
         # os.remove('_pgmem.dump.old')
         # os.remove('_pgmem.dump.new')
 
@@ -496,6 +498,9 @@ def MemoryContextStatsPrint(context: MemoryContext, passthru, stats_string):
         name = ident
         ident = ""
 
+    addr = context._c_memcxt.GetValueAsUnsigned()
+    if Args.with_addr:
+        name = f"{addr:#x} {name}"
     for i in range(level):
         dprint("  ", end="")
     ident = f": {ident}" if len(ident) > 0 else ""
@@ -505,9 +510,26 @@ def MemoryContextStatsPrint(context: MemoryContext, passthru, stats_string):
 
 
 def sbt(debugger, raw_args, result, internal_dict):
+    parser = argparse.ArgumentParser(description='Dump memory context stats')
+    parser.add_argument('-N', '--overwrite', action='store_true',
+                        help='overwrite the dump file')
+    parser.add_argument('-o', '--output',
+                        help='dump to file instead of stdout')
+    parser.add_argument('num_frames', metavar='num-frames',
+                        nargs='?', type=int, default=0,
+                        help='number of frames to dump')
+    args_list = shlex.split(raw_args)
+    args = parser.parse_args(args_list)
+
+    out_mode = "a"
+    if args.overwrite:
+        out_mode = "w"
+    if args.output:
+        sys.stdout = open(args.output, out_mode)
+    num_frames_out = args.num_frames
+
     process = debugger.GetSelectedTarget().GetProcess()
     frame = process.GetSelectedThread().GetSelectedFrame()
-    num_frames_out = int(raw_args) if raw_args else 0
 
     i = 1
     while frame.IsValid():
