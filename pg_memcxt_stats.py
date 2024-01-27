@@ -503,10 +503,35 @@ def MemoryContextStatsPrint(context: MemoryContext, passthru, stats_string):
     dprint(f"{name}: {stats_string}{ident}")
 
 
+def sbt(debugger, raw_args, result, internal_dict):
+    old_use_color = debugger.GetUseColor()
+    debugger.SetUseColor(False)
+
+    # Run the command
+    res = lldb.SBCommandReturnObject()
+    interpreter = debugger.GetCommandInterpreter()
+    interpreter.HandleCommand("settings show frame-format", res)
+    old_frame_format = res.GetOutput()
+    old_frame_format = old_frame_format[old_frame_format.index("\"") + 1:-2]
+    interpreter.HandleCommand(r"settings set frame-format "
+                              r"${function.name}\n", res)
+    interpreter.HandleCommand(f"bt {raw_args}", res)
+    # Get the output even
+    output = res.GetOutput() or res.GetError()
+    lines = output.splitlines()
+    for line in lines[1:]:
+        print(line.strip(" *"))
+
+    interpreter.HandleCommand(f"settings set frame-format "
+                              f"{old_frame_format}", res)
+    debugger.SetUseColor(old_use_color)
+
+
 def __lldb_init_module(debugger, internal_dict):
     add_cmd = "command script add -o -f pg_memcxt_stats"
     exported_cmd = [
         "pgmem",
+        "sbt",
     ]
     for cmd in exported_cmd:
         debugger.HandleCommand(f"{add_cmd}.{cmd} {cmd}")
