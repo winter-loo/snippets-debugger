@@ -4,6 +4,7 @@ import argparse
 import shlex
 import os
 import shutil
+import json
 
 
 # C macros in PostgreSQL
@@ -504,27 +505,71 @@ def MemoryContextStatsPrint(context: MemoryContext, passthru, stats_string):
 
 
 def sbt(debugger, raw_args, result, internal_dict):
-    old_use_color = debugger.GetUseColor()
-    debugger.SetUseColor(False)
+    process = debugger.GetSelectedTarget().GetProcess()
+    frame = process.GetSelectedThread().GetSelectedFrame()
+    num_frames_out = int(raw_args) if raw_args else 0
 
-    # Run the command
-    res = lldb.SBCommandReturnObject()
-    interpreter = debugger.GetCommandInterpreter()
-    interpreter.HandleCommand("settings show frame-format", res)
-    old_frame_format = res.GetOutput()
-    old_frame_format = old_frame_format[old_frame_format.index("\"") + 1:-2]
-    interpreter.HandleCommand(r"settings set frame-format "
-                              r"${function.name}\n", res)
-    interpreter.HandleCommand(f"bt {raw_args}", res)
-    # Get the output even
-    output = res.GetOutput() or res.GetError()
-    lines = output.splitlines()
-    for line in lines[1:]:
-        print(line.strip(" *"))
+    i = 1
+    while frame.IsValid():
+        print(f"{frame.GetFunctionName()}")
+        frame = frame.get_parent_frame()
+        if i == num_frames_out:
+            break
+        i += 1
 
-    interpreter.HandleCommand(f"settings set frame-format "
-                              f"{old_frame_format}", res)
-    debugger.SetUseColor(old_use_color)
+
+class StopHookContIfHasNot:
+    """
+    StopHookIfHasNot is a stop hook that can be used to continue execution
+    if the current frame call stack has the given name.
+
+    (lldb) command script import pg_memcxt_stats.py
+    (lldb) target stop-hook add -P pg_memcxt_stats.StopHookContIfHasNot -k fn -v foo
+    """
+
+    def __init__(self,
+                 target: lldb.SBTarget,
+                 extra_args: lldb.SBStructuredData,
+                 internal_dict):
+        self.target = target
+        stream = lldb.SBStream()
+        extra_args.GetAsJSON(stream)
+        self.args = json.loads(stream.GetData())
+
+    def handle_stop(self,
+                    exe_ctx: lldb.SBExecutionContext,
+                    stream: lldb.SBStream):
+        frame = exe_ctx.GetFrame()
+        should_stop = True
+        fname = self.args["fn"]
+        while frame.IsValid():
+            if frame.GetFunctionName() == fname:
+                should_stop = False
+                break
+            frame = frame.get_parent_frame()
+        return should_stop
+
+
+#
+# Too slow to use
+#
+def cc(debugger, raw_args, result, internal_dict):
+    """
+    cc is a command that can be used to continue execution if the current frame
+    call stack has the given name.
+    """
+    if lldb_target.GetProcess().GetState() == lldb.eStateRunning:
+        print("Process is running.  Use 'process interrupt' to pause execution.")
+        return
+
+    parser = argparse.ArgumentParser(description='conditionally continue')
+    parser.add_argument('fn', metavar='<function name>',
+                        help='function name to continue execution')
+    args_list = shlex.split(raw_args)
+    args = parser.parse_args(args_list)
+
+    add_stop_hook = "target stop-hook add -P pg_memcxt_stats.StopHookContIfHasNot"
+    debugger.HandleCommand(f"{add_stop_hook} -k fn -v {args.fn}")
 
 
 def __lldb_init_module(debugger, internal_dict):
@@ -532,6 +577,7 @@ def __lldb_init_module(debugger, internal_dict):
     exported_cmd = [
         "pgmem",
         "sbt",
+        "cc",
     ]
     for cmd in exported_cmd:
         debugger.HandleCommand(f"{add_cmd}.{cmd} {cmd}")
