@@ -149,7 +149,7 @@ def _handle_args(raw_args):
 
     parser.add_argument('memory_context_var', nargs='?',
                         default='CurrentMemoryContext',
-                        metavar='[memory context]',
+                        metavar='<memory context>',
                         help='Memory context to be dumped')
     parser.add_argument('-N', '--overwrite', action='store_true',
                         help='overwrite the dump file')
@@ -169,6 +169,8 @@ def _handle_args(raw_args):
                         help='show all memory contexts')
     parser.add_argument('-r', '--with-addr', action='store_true',
                         help='show memory context address')
+    parser.add_argument('-n', '--cxtname', metavar='name',
+                        help='memory context name')
 
     global Args
     args_list = shlex.split(raw_args)
@@ -206,13 +208,15 @@ def pgmem(debugger, raw_args, result, internal_dict):
         print("expression `{}` is not valid"
               .format(Args.memory_context_var))
         return
+
     memcxt = MemoryContext(memcxt)
     assert memcxt.typcxt in CONTEXT_KINDS, \
         f"{Args.memory_context_var} is not an MemoryContext"
 
     grand_totals = MemoryContextCounters()
+    begin_print = False if Args.cxtname else True
     MemoryContextStatsInternal(
-        memcxt, 0, True, Args.max_children, grand_totals)
+        memcxt, 0, begin_print, True, Args.max_children, grand_totals)
     print(grand_totals)
     if Args.diff:
         Newdumpfile.close()
@@ -425,12 +429,17 @@ MEMORY_CONTEXT_STATS_IMPL = {
 }
 
 
-def MemoryContextStatsInternal(memcxt, level, printit, max_children, totals):
+def MemoryContextStatsInternal(memcxt, level, begin_print, printit,
+                               max_children, totals):
     local_totals = MemoryContextCounters()
+
+    if not begin_print:
+        begin_print = Args.cxtname == memcxt.name
+        level = 0
 
     # Examine the context itself
     fn_stats = MEMORY_CONTEXT_STATS_IMPL[memcxt.typcxt]
-    fn_print = MemoryContextStatsPrint if printit else None
+    fn_print = MemoryContextStatsPrint if begin_print and printit else None
     fn_stats(memcxt, fn_print, level, totals)
 
     ichild = 0
@@ -438,10 +447,12 @@ def MemoryContextStatsInternal(memcxt, level, printit, max_children, totals):
     while child.is_not_null():
         if ichild < max_children:
             MemoryContextStatsInternal(
-                child, level + 1, printit, max_children, totals)
+                child, level + 1, begin_print,
+                printit, max_children, totals)
         else:
             MemoryContextStatsInternal(
-                child, level + 1, False, max_children, local_totals)
+                child, level + 1, begin_print,
+                False, max_children, local_totals)
         child = MemoryContext(child.nextchild)
         ichild += 1
 
