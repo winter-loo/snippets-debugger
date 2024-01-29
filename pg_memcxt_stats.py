@@ -171,6 +171,8 @@ def _handle_args(raw_args):
                         help='show memory context address')
     parser.add_argument('-n', '--cxtname', metavar='name',
                         help='memory context name')
+    parser.add_argument('-p', '--parent', metavar='level', type=int, default=0,
+                        help='parent of current memory context')
 
     global Args
     args_list = shlex.split(raw_args)
@@ -203,6 +205,11 @@ def pgmem(debugger, raw_args, result, internal_dict):
 
     if Args.all_contexts:
         Args.memory_context_var = "TopMemoryContext"
+
+    if Args.memory_context_var == "CurrentMemoryContext" and Args.parent > 0:
+        for i in range(Args.parent):
+            Args.memory_context_var += "->parent"
+
     memcxt = frame.EvaluateExpression(Args.memory_context_var)
     if not memcxt.GetError().Success():
         print("expression `{}` is not valid"
