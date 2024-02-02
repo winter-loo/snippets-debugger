@@ -533,6 +533,8 @@ def sbt(debugger, raw_args, result, internal_dict):
                         help='overwrite the dump file')
     parser.add_argument('-o', '--output',
                         help='dump to file instead of stdout')
+    parser.add_argument('-r', '--output-reversly', action='store_true',
+                        help='reversly output call stack')
     parser.add_argument('num_frames', metavar='num-frames',
                         nargs='?', type=int, default=0,
                         help='number of frames to dump')
@@ -546,16 +548,27 @@ def sbt(debugger, raw_args, result, internal_dict):
         sys.stdout = open(args.output, out_mode)
     num_frames_out = args.num_frames
 
+    routput = None
+    if args.output_reversly:
+        routput = []
+
     process = debugger.GetSelectedTarget().GetProcess()
     frame = process.GetSelectedThread().GetSelectedFrame()
 
     i = 1
     while frame.IsValid():
-        print(f"{frame.GetFunctionName()}")
+        if routput is not None:
+            routput.append(frame.GetFunctionName())
+        else:
+            print(f"{frame.GetFunctionName()}")
         frame = frame.get_parent_frame()
         if i == num_frames_out:
             break
         i += 1
+
+    if routput is not None:
+        for i in range(len(routput) - 1, -1, -1):
+            print(routput[i])
 
 
 class StopHookContIfHasNot:
