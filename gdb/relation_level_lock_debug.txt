@@ -3,12 +3,15 @@ command
 set logging enabled off
 set logging file myoid.txt
 set logging enabled on
+print lockmode
 print relationId
 set logging enabled off
 set logging file gdb.trace
 set logging enabled on
-shell oid=`cat myoid.txt | tail -1 | cut -d'=' -f2`; psql -qtAX -c "select relname from pg_class where oid = $oid" >> gdb.trace
-bt
+shell oid=`cat myoid.txt | tail -1 | cut -d'=' -f2`; \
+    relname=`psql -qtAX -c "select relname from pg_class where oid = $oid"`; \
+    lockmode=`cat myoid.txt | tail -2 | head -1 | cut -d'=' -f2`; \
+    echo "relation_open($relname, $lockmode)" >> gdb.trace
 set logging enabled off
 continue
 end
@@ -16,14 +19,17 @@ end
 b relation_close
 command
 set logging enabled off
-set logging enabled on
 set logging file myoid.txt
+set logging enabled on
+p lockmode
 p relation->rd_locator.relNumber
 set logging enabled off
 set logging file gdb.trace
 set logging enabled on
-shell oid=`cat myoid.txt | tail -1 | cut -d'=' -f2`; psql -qtAX -c "select relname from pg_class where oid = $oid" >> gdb.trace
-bt
+shell oid=`cat myoid.txt | tail -1 | cut -d'=' -f2`; \
+    relname=`psql -qtAX -c "select relname from pg_class where oid = $oid"`; \
+    lockmode=`cat myoid.txt | tail -2 | head -1 | cut -d'=' -f2`; \
+    echo "relation_close($relname, $lockmode)" >> gdb.trace
 set logging enabled off
 continue
 end

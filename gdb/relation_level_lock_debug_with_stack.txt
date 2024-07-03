@@ -1,0 +1,29 @@
+b relation_open
+command
+set logging enabled off
+set logging file myoid.txt
+set logging enabled on
+print relationId
+set logging enabled off
+set logging file gdb.trace
+set logging enabled on
+shell oid=`cat myoid.txt | tail -1 | cut -d'=' -f2`; psql -qtAX -c "select relname from pg_class where oid = $oid" >> gdb.trace
+bt
+set logging enabled off
+continue
+end
+
+b relation_close
+command
+set logging enabled off
+set logging file myoid.txt
+set logging enabled on
+p relation->rd_locator.relNumber
+set logging enabled off
+set logging file gdb.trace
+set logging enabled on
+shell oid=`cat myoid.txt | tail -1 | cut -d'=' -f2`; psql -qtAX -c "select relname from pg_class where oid = $oid" >> gdb.trace
+bt
+set logging enabled off
+continue
+end
