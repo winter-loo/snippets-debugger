@@ -1,5 +1,16 @@
 # Usage
 
+## display PostgreSQL memory context tree
+
+```
+(lldb) command script import ./pg_memcxt_stats.py
+(lldb) pgmem CacheMemoryContext
+```
+
+NOTE: Your debugging session should be interrupted state to execute commands above.
+
+For more usage of `pgmem`, execute `pgmem -h`.
+
 ## simple case
 
 ```

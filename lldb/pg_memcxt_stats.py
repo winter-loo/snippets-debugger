@@ -150,7 +150,7 @@ def _handle_args(raw_args):
     parser.add_argument('memory_context_var', nargs='?',
                         default='CurrentMemoryContext',
                         metavar='<memory context>',
-                        help='Memory context to be dumped')
+                        help='Memory context to be dumped, default: CurrentMemoryContext')
     parser.add_argument('-N', '--overwrite', action='store_true',
                         help='overwrite the dump file')
     parser.add_argument('-o', '--output',
